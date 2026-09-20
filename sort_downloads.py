@@ -29,6 +29,8 @@ LOG = HOME / "Library/Logs/jev-downloads-sorter.log"
 ENDPOINT = os.environ.get("JEV_SORT_ENDPOINT", "https://openrouter.ai/api/alpha/decisions")
 MODEL = os.environ.get("JEV_SORT_MODEL", "typesafe/jev-1.13")
 STABLE_SECONDS = float(os.environ.get("JEV_SORT_STABLE_SECONDS", "2"))
+# Names at the root to leave alone, comma-separated (a folder another tool fills, for instance).
+IGNORE = {n.strip() for n in os.environ.get("JEV_SORT_IGNORE", "").split(",") if n.strip()}
 
 # Files the key may live in, first match wins. launchd does not source your shell rc.
 KEY_FILES = [
@@ -109,7 +111,7 @@ def openrouter_key():
 def candidates(folders):
     for entry in sorted(DOWNLOADS.iterdir()):
         name = entry.name
-        if name.startswith(".") or name in folders or name.endswith(".app"):
+        if name.startswith(".") or name in folders or name in IGNORE or name.endswith(".app"):
             continue
         if name.lower().endswith(PARTIAL) or name.startswith("Unconfirmed "):
             continue

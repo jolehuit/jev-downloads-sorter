@@ -78,5 +78,8 @@ that does not exist. The same request works against TypeSafe's own endpoint
 | `JEV_SORT_MODEL` | `typesafe/jev-1.13` |
 | `JEV_SORT_ENDPOINT` | `https://openrouter.ai/api/alpha/decisions` |
 | `JEV_SORT_STABLE_SECONDS` | `2` |
+| `JEV_SORT_IGNORE` | empty; comma-separated names at the root to leave alone |
+
+Set them in the environment when running `install.sh`, they are written into the agent.
 
 MIT.

@@ -66,6 +66,8 @@ $ARGS    </array>
         <string>$DOWNLOADS</string>
         <key>JEV_SORT_CONFIG</key>
         <string>$CONFIG</string>
+        <key>JEV_SORT_IGNORE</key>
+        <string>${JEV_SORT_IGNORE:-}</string>
     </dict>
     <key>StandardErrorPath</key>
     <string>$HOME/Library/Logs/jev-downloads-sorter.err</string>
