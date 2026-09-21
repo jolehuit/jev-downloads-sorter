@@ -2,12 +2,13 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Sort new downloads into folders, with Jev picking the folder.
+"""Sort new downloads into folders, with a decision model picking the folder.
 
 Run by launchd every time ~/Downloads changes. For each finished download at
-the root, one call to Jev (TypeSafe's decision model, via OpenRouter) picks a
-destination among the folders you defined. If the API is unreachable, falls
-back to an extension map. Never creates folders, never overwrites.
+the root, one decision picks a destination among the folders you defined:
+Jev (TypeSafe's decision model, via OpenRouter) or Laya (open weights, runs on
+your machine). If the model is unavailable, falls back to an extension map.
+Never creates folders, never overwrites.
 """
 
 import json
@@ -26,8 +27,11 @@ HOME = Path.home()
 DOWNLOADS = Path(os.environ.get("JEV_SORT_DIR", HOME / "Downloads"))
 CONFIG = Path(os.environ.get("JEV_SORT_CONFIG", HOME / ".config/jev-downloads-sorter/folders.json"))
 LOG = HOME / "Library/Logs/jev-downloads-sorter.log"
+BACKEND = os.environ.get("JEV_SORT_BACKEND", "jev")  # "jev" (OpenRouter) or "laya" (local)
 ENDPOINT = os.environ.get("JEV_SORT_ENDPOINT", "https://openrouter.ai/api/alpha/decisions")
 MODEL = os.environ.get("JEV_SORT_MODEL", "typesafe/jev-1.13")
+LAYA_MODEL = os.environ.get("JEV_SORT_LAYA_MODEL", "convaiinnovations/laya")
+LAYA_SUBFOLDER = os.environ.get("JEV_SORT_LAYA_SUBFOLDER", "typed-decisions")
 STABLE_SECONDS = float(os.environ.get("JEV_SORT_STABLE_SECONDS", "2"))
 # Names at the root to leave alone, comma-separated (a folder another tool fills, for instance).
 IGNORE = {n.strip() for n in os.environ.get("JEV_SORT_IGNORE", "").split(",") if n.strip()}
@@ -45,16 +49,16 @@ KEY_FILES = [
 DEFAULT_FOLDERS = {
     "Documents": "things to read: pdf, docx, pptx, txt, md, invoices, resumes, contracts, papers, books",
     "Spreadsheets": "tabular data: xlsx, csv, ods, numbers, database exports",
-    "Images": "photos and pictures: jpg, png, heic, webp, svg, gif, logos, generated visuals",
+    "Images": "photos and pictures: jpg, png, heic, webp, svg, gif, logos, generated visuals; also a folder that contains mostly images or logos",
     "Screenshots": "screen captures from macOS or a phone (name starts with Screenshot, Capture d'écran...)",
-    "Videos": "video: mp4, mov, webm, screen recordings, footage, renders",
-    "Audio": "sound and music: mp3, wav, opus, m4a, stems, beats, samples, voice memos",
+    "Videos": "video: mp4, mov, webm, screen recordings, footage, renders; also a folder of video files",
+    "Audio": "sound and music: mp3, wav, opus, m4a, stems, beats, samples, voice memos; also a folder that contains mostly audio files (drum kit, sample pack, stems)",
     "Archives": "compressed archives not yet extracted: zip, rar, 7z, tar.gz",
     "Installers": "application installers: dmg, pkg, app bundles",
-    "Code": "source code and technical data: js, ts, py, sh, json, xml, ipynb, har, sql, scripts, configs",
+    "Code": "source code and technical data: js, ts, py, sh, json, xml, ipynb, har, sql, scripts, configs; also a folder that is a code project",
     "Web pages": "saved web pages: html plus their _files folder",
     "3D": "3D models: glb, usdz, blend, fbx, obj, stl",
-    "Folders": "extracted or downloaded folders (projects, kits, exports) that fit no other category",
+    "Folders": "a folder with mixed or unknown contents that fits no other category",
     "Misc": "anything else: ics, pkpass, unknown formats",
 }
 
@@ -75,6 +79,7 @@ BY_EXTENSION = {ext: folder for folder, exts in EXTENSIONS.items() for ext in ex
 
 # In-progress downloads, per browser.
 PARTIAL = (".crdownload", ".part", ".download", ".partial", ".tmp", ".aria2", ".!qb")
+SCREENSHOT_PREFIXES = ("Screenshot", "Screen Shot", "Capture d\u2019e", "Capture d'e")
 TEXT_LIKE = {".txt", ".md", ".csv", ".json", ".html", ".xml", ".js", ".py", ".sh", ".srt"}
 
 
@@ -149,10 +154,26 @@ def origin_url(entry):
         return None
 
 
+def contents_kind(entry):
+    """What a folder mostly holds, from the extension map: '3 files, all images'."""
+    files = [p for p in entry.rglob("*") if p.is_file() and not p.name.startswith(".")][:500]
+    if not files:
+        return None
+    kinds = {}
+    for p in files:
+        k = BY_EXTENSION.get(p.suffix.lower().lstrip("."), "other")
+        kinds[k] = kinds.get(k, 0) + 1
+    top, n = max(kinds.items(), key=lambda kv: kv[1])
+    share = "all" if n == len(files) else ("mostly" if n / len(files) >= 0.6 else "some")
+    return f"{len(files)} files, {share} {KIND_LABEL.get(top, 'files of unknown kind')}"
+
+
+KIND_LABEL = {"Images": "images", "Videos": "video files", "Audio": "audio files", "Documents": "documents",
+              "Spreadsheets": "spreadsheets", "Archives": "archives", "Installers": "installers", "Code": "code",
+              "Web pages": "web pages", "3D": "3D models"}
+
+
 def excerpt(entry, limit=400):
-    if entry.is_dir():
-        names = [p.name for p in list(entry.iterdir())[:12]]
-        return "contains: " + ", ".join(names)
     if entry.suffix.lower() in TEXT_LIKE:
         try:
             return entry.read_text(errors="replace")[:limit]
@@ -169,34 +190,45 @@ def human(n):
     return f"{n:.1f} TB"
 
 
-def ask_jev(entry, folders, key):
+GOAL = "Pick the folder this download belongs in."
+RULES = [
+    "File type comes first, unless the name or the origin clearly says otherwise.",
+    "For a folder, decide from what it contains: mostly sounds goes with audio, mostly pictures with images, and so on.",
+    "An .html file next to a _files folder is a saved web page.",
+    "The catch-all folder only when nothing else fits.",
+]
+
+
+def describe(entry):
     file = {
         "name": entry.name,
         "type": "folder" if entry.is_dir() else (entry.suffix.lower().lstrip(".") or "no extension"),
         "size": human(size(entry)),
     }
+    if entry.is_dir():
+        file["contents"] = ", ".join(p.name for p in list(entry.iterdir())[:12])
+        if (kind := contents_kind(entry)):
+            file["contents_kind"] = kind
+    elif entry.name.startswith(SCREENSHOT_PREFIXES):
+        file["kind"] = "screenshot"
+    elif (kind := BY_EXTENSION.get(entry.suffix.lower().lstrip("."))):
+        file["kind"] = KIND_LABEL.get(kind, kind)
     if (url := origin_url(entry)):
         file["downloaded_from"] = url
-    if (text := excerpt(entry)):
+    if not entry.is_dir() and (text := excerpt(entry)):
         file["excerpt"] = text
+    return file
+
+
+def criteria(folders):
+    return {name: {"folder": name, "contents": desc} for name, desc in folders.items()}
+
+
+def ask_jev(entry, folders, key):
     body = {
         "model": MODEL,
-        "state": {"file": file},
-        "questions": {
-            "folder": {
-                "type": "choice",
-                "criteria": {name: {"folder": name, "contents": desc} for name, desc in folders.items()},
-                "instructions": {
-                    "goal": "Pick the folder this download belongs in.",
-                    "rules": [
-                        "File type comes first, unless the name or the origin clearly says otherwise.",
-                        "An extracted folder that is mostly sounds goes with audio, mostly pictures with images, and so on.",
-                        "An .html file next to a _files folder is a saved web page.",
-                        "The catch-all folder only when nothing else fits.",
-                    ],
-                },
-            }
-        },
+        "state": {"file": describe(entry)},
+        "questions": {"folder": {"type": "choice", "criteria": criteria(folders), "instructions": {"goal": GOAL, "rules": RULES}}},
     }
     req = urllib.request.Request(
         ENDPOINT,
@@ -207,6 +239,39 @@ def ask_jev(entry, folders, key):
     with urllib.request.urlopen(req, timeout=20) as resp:
         result = json.load(resp)
     answer = result["answers"]["folder"]
+    choice = answer["choice"]
+    if choice not in folders:
+        raise ValueError(f"choice outside the folder list: {choice}")
+    return choice, answer.get("confidence"), round((time.perf_counter() - started) * 1000)
+
+
+_laya_agent = None
+
+
+def laya_agent():
+    """Laya loaded once per process, on the GPU when there is one (MPS on a Mac).
+    transformers randomly initializes every weight before loading the checkpoint,
+    which is 27 s of the 30 s load on an M1 Pro; skipping that brings it to 1.6 s."""
+    global _laya_agent
+    if _laya_agent is None:
+        import laya
+        try:
+            from transformers.initialization import no_init_weights
+        except ImportError:  # transformers < 5
+            from transformers.modeling_utils import no_init_weights
+        with no_init_weights():
+            _laya_agent = laya.load(LAYA_MODEL, subfolder=LAYA_SUBFOLDER or None)
+    return _laya_agent
+
+
+def ask_laya(entry, folders):
+    """Laya's question budget is 256 tokens shared by all options, so the options
+    are plain strings and the instructions one sentence; longer hurts."""
+    agent = laya_agent()
+    questions = {"folder": {"type": "choice", "criteria": dict(folders),
+                            "instructions": GOAL + " Decide from the file type; for a folder, decide from what it contains."}}
+    started = time.perf_counter()
+    answer = agent.predict({"file": describe(entry)}, questions)["answers"]["folder"]
     choice = answer["choice"]
     if choice not in folders:
         raise ValueError(f"choice outside the folder list: {choice}")
@@ -250,8 +315,8 @@ def main():
     if missing:
         log(f"ERROR missing folders, create them first: {', '.join(missing)}")
         return
-    key = openrouter_key()
-    if not key:
+    key = openrouter_key() if BACKEND == "jev" else None
+    if BACKEND == "jev" and not key:
         log("ERROR no OpenRouter key found, falling back to extensions")
     moved = []
     for entry in list(candidates(folders)):
@@ -262,7 +327,12 @@ def main():
             folder, conf, ms = by_extension(entry, folders), None, 0
         else:
             folder = conf = None
-            if key:
+            if BACKEND == "laya":
+                try:
+                    folder, conf, ms = ask_laya(entry, folders)
+                except Exception as e:  # torch/laya raise all sorts; the fallback must run
+                    log(f"ERROR Laya on {entry.name}: {e!r}")
+            elif key:
                 try:
                     folder, conf, ms = ask_jev(entry, folders, key)
                 except (urllib.error.URLError, urllib.error.HTTPError, KeyError, ValueError, TimeoutError) as e:
@@ -275,7 +345,7 @@ def main():
         except OSError as e:
             log(f"ERROR moving {entry.name}: {e}")
             continue
-        detail = f"jev {conf:.2f} {ms} ms" if conf is not None else "rule"
+        detail = f"{BACKEND} {conf:.2f} {ms} ms" if conf is not None else "rule"
         log(f"{entry.name} -> {folder}/ ({detail})")
         moved.append(f"{entry.name} → {folder}")
     if moved:
@@ -283,6 +353,11 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--warm" in sys.argv:  # download and load the local model once, at install time
+        started = time.perf_counter()
+        laya_agent()
+        print(f"Laya ready ({time.perf_counter() - started:.1f} s)")
+        sys.exit(0)
     try:
         main()
     except Exception as e:  # never die silently under launchd

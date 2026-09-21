@@ -18,7 +18,12 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 
 # Runner: uv if present (no install, stdlib only), else python3 from PATH.
-if command -v uv >/dev/null 2>&1; then
+# Local mode (JEV_SORT_BACKEND=laya) needs uv: it pulls laya, torch and the weights.
+BACKEND="${JEV_SORT_BACKEND:-jev}"
+if [ "$BACKEND" = "laya" ]; then
+  command -v uv >/dev/null 2>&1 || { echo "Local mode needs uv (https://docs.astral.sh/uv/)"; exit 1; }
+  RUNNER=("$(command -v uv)" run --no-project --quiet --with laya "$SCRIPT")
+elif command -v uv >/dev/null 2>&1; then
   RUNNER=("$(command -v uv)" run --no-project --quiet "$SCRIPT")
 else
   RUNNER=("$(command -v python3)" "$SCRIPT")
@@ -68,6 +73,8 @@ $ARGS    </array>
         <string>$CONFIG</string>
         <key>JEV_SORT_IGNORE</key>
         <string>${JEV_SORT_IGNORE:-}</string>
+        <key>JEV_SORT_BACKEND</key>
+        <string>$BACKEND</string>
     </dict>
     <key>StandardErrorPath</key>
     <string>$HOME/Library/Logs/jev-downloads-sorter.err</string>
@@ -76,7 +83,13 @@ $ARGS    </array>
 PLIST
 
 plutil -lint "$PLIST" >/dev/null
+
+if [ "$BACKEND" = "laya" ]; then
+  echo "Downloading and loading Laya once (about 1 GB the first time)..."
+  JEV_SORT_BACKEND=laya "${RUNNER[@]}" --warm || { echo "Laya failed to load; agent not installed."; exit 1; }
+fi
+
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "Agent loaded. Watching $DOWNLOADS"
+echo "Agent loaded. Watching $DOWNLOADS (backend: $BACKEND)"
 echo "Folders: $(echo "$FOLDERS" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
 echo "Log:     ~/Library/Logs/jev-downloads-sorter.log"
