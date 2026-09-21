@@ -55,6 +55,22 @@ Write `~/.config/jev-downloads-sorter/folders.json` before running
 what Jev reads, so say what you mean. Rename or add folders whenever you like,
 just keep the file and the folders on disk in sync.
 
+## Do you even need a model?
+
+If your folders are types (Documents, Images, Audio...), mostly no. The
+extension decides, screenshots are a naming rule, and a folder goes with what
+it mostly holds. That is what `rules` mode does, instantly, with nothing
+installed and nothing sent anywhere:
+
+```bash
+JEV_SORT_BACKEND=rules ./install.sh
+```
+
+A decision model earns its place when the folders mean something the
+extension cannot tell: `Invoices`, `Client X`, `To read`, `Music production`.
+There it reads the name, the origin URL and the excerpt, and Jev is the more
+reliable of the two.
+
 ## Local mode with Laya
 
 No API key, nothing leaves the machine. [Laya](https://huggingface.co/convaiinnovations/laya)
@@ -97,7 +113,7 @@ that does not exist. The same request works against TypeSafe's own endpoint
 | `JEV_SORT_ENDPOINT` | `https://openrouter.ai/api/alpha/decisions` |
 | `JEV_SORT_STABLE_SECONDS` | `2` |
 | `JEV_SORT_IGNORE` | empty; comma-separated names at the root to leave alone |
-| `JEV_SORT_BACKEND` | `jev`; `laya` runs the local model |
+| `JEV_SORT_BACKEND` | `jev`; `laya` runs the local model; `rules` uses no model |
 | `JEV_SORT_LAYA_MODEL` | `convaiinnovations/laya` |
 | `JEV_SORT_LAYA_SUBFOLDER` | `typed-decisions` |
 

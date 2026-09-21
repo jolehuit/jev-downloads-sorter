@@ -18,7 +18,8 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 
 # Runner: uv if present (no install, stdlib only), else python3 from PATH.
-# Local mode (JEV_SORT_BACKEND=laya) needs uv: it pulls laya, torch and the weights.
+# JEV_SORT_BACKEND: jev (default), laya (local model, needs uv: it pulls laya, torch and
+# the weights) or rules (no model at all).
 BACKEND="${JEV_SORT_BACKEND:-jev}"
 if [ "$BACKEND" = "laya" ]; then
   command -v uv >/dev/null 2>&1 || { echo "Local mode needs uv (https://docs.astral.sh/uv/)"; exit 1; }

@@ -27,7 +27,7 @@ HOME = Path.home()
 DOWNLOADS = Path(os.environ.get("JEV_SORT_DIR", HOME / "Downloads"))
 CONFIG = Path(os.environ.get("JEV_SORT_CONFIG", HOME / ".config/jev-downloads-sorter/folders.json"))
 LOG = HOME / "Library/Logs/jev-downloads-sorter.log"
-BACKEND = os.environ.get("JEV_SORT_BACKEND", "jev")  # "jev" (OpenRouter) or "laya" (local)
+BACKEND = os.environ.get("JEV_SORT_BACKEND", "jev")  # "jev" (OpenRouter), "laya" (local model) or "rules" (no model)
 ENDPOINT = os.environ.get("JEV_SORT_ENDPOINT", "https://openrouter.ai/api/alpha/decisions")
 MODEL = os.environ.get("JEV_SORT_MODEL", "typesafe/jev-1.13")
 LAYA_MODEL = os.environ.get("JEV_SORT_LAYA_MODEL", "convaiinnovations/laya")
@@ -129,14 +129,25 @@ def size(entry):
     return entry.stat().st_size
 
 
-def is_stable(entry):
-    """True once the size has not changed for STABLE_SECONDS."""
-    try:
-        before = size(entry)
-        time.sleep(STABLE_SECONDS)
-        return entry.exists() and size(entry) == before
-    except OSError:
-        return False
+def settled(entries):
+    """The entries whose size did not change over STABLE_SECONDS, measured once for the whole batch."""
+    before = {}
+    for e in entries:
+        try:
+            before[e] = size(e)
+        except OSError:
+            pass
+    time.sleep(STABLE_SECONDS)
+    out = []
+    for e, b in before.items():
+        try:
+            if e.exists() and size(e) == b:
+                out.append(e)
+            else:
+                log(f"waiting {e.name} (still being written)")
+        except OSError:
+            pass
+    return out
 
 
 def origin_url(entry):
@@ -154,18 +165,27 @@ def origin_url(entry):
         return None
 
 
-def contents_kind(entry):
-    """What a folder mostly holds, from the extension map: '3 files, all images'."""
+def dominant_kind(entry):
+    """(default folder name, share) of what a folder mostly holds, from the extension map."""
     files = [p for p in entry.rglob("*") if p.is_file() and not p.name.startswith(".")][:500]
     if not files:
-        return None
+        return None, 0
     kinds = {}
     for p in files:
         k = BY_EXTENSION.get(p.suffix.lower().lstrip("."), "other")
         kinds[k] = kinds.get(k, 0) + 1
     top, n = max(kinds.items(), key=lambda kv: kv[1])
-    share = "all" if n == len(files) else ("mostly" if n / len(files) >= 0.6 else "some")
-    return f"{len(files)} files, {share} {KIND_LABEL.get(top, 'files of unknown kind')}"
+    return top, n / len(files)
+
+
+def contents_kind(entry):
+    """'3 files, all images', for the models."""
+    top, share = dominant_kind(entry)
+    if top is None:
+        return None
+    count = len([p for p in entry.rglob("*") if p.is_file() and not p.name.startswith(".")][:500])
+    word = "all" if share == 1 else ("mostly" if share >= 0.6 else "some")
+    return f"{count} files, {word} {KIND_LABEL.get(top, 'files of unknown kind')}"
 
 
 KIND_LABEL = {"Images": "images", "Videos": "video files", "Audio": "audio files", "Documents": "documents",
@@ -279,13 +299,21 @@ def ask_laya(entry, folders):
 
 
 def by_extension(entry, folders):
-    """Fallback. Maps default folder names onto whatever folders exist, by position."""
+    """No model: screenshot names, the extension map, and for a folder what it
+    mostly holds (60 % or more of one kind). Default folder names are mapped
+    onto whatever folders exist, by position."""
     names = list(folders)
     defaults = list(DEFAULT_FOLDERS)
     alias = {d: names[i] if i < len(names) else names[-1] for i, d in enumerate(defaults)}
     if entry.is_dir():
-        wanted = "Web pages" if entry.name.endswith("_files") else "Folders"
-    elif entry.name.startswith(("Screenshot", "Screen Shot", "Capture d’e", "Capture d'e")):
+        top, share = dominant_kind(entry)
+        if entry.name.endswith("_files"):
+            wanted = "Web pages"
+        elif top in DEFAULT_FOLDERS and share >= 0.6:
+            wanted = top
+        else:
+            wanted = "Folders"
+    elif entry.name.startswith(SCREENSHOT_PREFIXES):
         wanted = "Screenshots"
     else:
         wanted = BY_EXTENSION.get(entry.suffix.lower().lstrip("."), "Misc")
@@ -317,17 +345,16 @@ def main():
         return
     key = openrouter_key() if BACKEND == "jev" else None
     if BACKEND == "jev" and not key:
-        log("ERROR no OpenRouter key found, falling back to extensions")
+        log("ERROR no OpenRouter key found, falling back to rules")
     moved = []
-    for entry in list(candidates(folders)):
-        if not is_stable(entry):
-            log(f"waiting {entry.name} (still being written)")
-            continue
+    for entry in settled(list(candidates(folders))):
         if entry.is_dir() and entry.name.endswith("_files"):
             folder, conf, ms = by_extension(entry, folders), None, 0
         else:
             folder = conf = None
-            if BACKEND == "laya":
+            if BACKEND == "rules":
+                pass
+            elif BACKEND == "laya":
                 try:
                     folder, conf, ms = ask_laya(entry, folders)
                 except Exception as e:  # torch/laya raise all sorts; the fallback must run
@@ -345,7 +372,7 @@ def main():
         except OSError as e:
             log(f"ERROR moving {entry.name}: {e}")
             continue
-        detail = f"{BACKEND} {conf:.2f} {ms} ms" if conf is not None else "rule"
+        detail = f"{BACKEND} {conf:.2f} {ms} ms" if conf is not None else "rules"
         log(f"{entry.name} -> {folder}/ ({detail})")
         moved.append(f"{entry.name} → {folder}")
     if moved:
